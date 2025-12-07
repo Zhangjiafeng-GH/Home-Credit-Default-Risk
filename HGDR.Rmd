@@ -1,0 +1,161 @@
+---
+title: "Home Credit Default Risk"
+author: "Jiafeng zhang"
+date: "Sept 24, 2025"
+output: 
+  html_document:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    embed-resources: true
+execute:
+  include: true
+  eval: true    
+  warning: false
+  message: false
+
+---
+# Business and Analytic Problems
+Home Credit faces the critical challenge of expanding financial inclusion to underserved populations while minimizing loan defaults. Traditional credit scoring methods often exclude applicants with limited credit history, creating a barrier to financial services. The business needs a predictive model that can accurately identify high-risk applicants using alternative data sources, enabling responsible lending to previously excluded customers while maintaining portfolio quality.
+
+```{r}
+# Clear environment and load packages
+library(tidyverse)
+library(randomForest)
+library(caret)
+library(pROC)
+
+
+
+# Load and inspect data
+
+application_train <- read_csv("application_train.csv")
+
+
+```
+
+
+```{r}
+print(table(application_train$TARGET))
+```
+The initial data contains 307,511 applications with 122 features. The target variable shows significant class imbalance, which requires special handling during modeling.
+
+
+```{r}
+
+
+# Select reliable features with minimal missing values
+selected_features <- c(
+  "TARGET",
+  "EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3",  # External credit scores
+  "AMT_INCOME_TOTAL", "AMT_CREDIT", "AMT_ANNUITY",  # Financial information
+  "DAYS_BIRTH", "DAYS_EMPLOYED",                    # Demographic information
+  "CNT_CHILDREN", "FLAG_OWN_CAR", "FLAG_OWN_REALTY" # Personal circumstances
+)
+
+# Create clean dataset
+clean_data <- application_train %>%
+  select(all_of(selected_features)) %>%
+  # Remove rows with missing target
+  filter(!is.na(TARGET)) %>%
+  # Handle missing values in numeric columns
+  mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .))) %>%
+  # Remove any remaining rows with NAs
+  filter(complete.cases(.))
+
+
+print(table(clean_data$TARGET))
+
+```
+```{r}
+# Create derived features
+
+model_data <- clean_data %>%
+  mutate(
+    # Financial ratios
+    CREDIT_INCOME_RATIO = AMT_CREDIT / (AMT_INCOME_TOTAL + 1),
+    ANNUITY_INCOME_RATIO = AMT_ANNUITY / (AMT_INCOME_TOTAL + 1),
+    # Age and employment
+    AGE = -DAYS_BIRTH / 365,
+    EMPLOYMENT_LENGTH = ifelse(DAYS_EMPLOYED > 0, 0, -DAYS_EMPLOYED / 365),
+    # Fix extreme values
+    CREDIT_INCOME_RATIO = pmin(CREDIT_INCOME_RATIO, 10),  # Cap at 10
+    ANNUITY_INCOME_RATIO = pmin(ANNUITY_INCOME_RATIO, 1)  # Cap at 1
+  ) %>%
+  select(-DAYS_BIRTH, -DAYS_EMPLOYED)  # Remove original columns
+
+model_data
+```
+We created financial ratios that capture the relationship between loan size and income, which are critical for assessing repayment capacity. The derived features provide more intuitive and potentially more predictive variables for the model.
+
+```{r}
+# Split data
+
+set.seed(123)
+train_index <- createDataPartition(model_data$TARGET, p = 0.8, list = FALSE)
+train_data <- model_data[train_index, ]
+validation_data <- model_data[-train_index, ]
+
+validation_data
+```
+We use an 80-20 split for training and validation to ensure sufficient data for model training while maintaining a robust validation set. The similar default rates in both sets confirm proper stratification.
+
+```{r}
+# Handle class imbalance
+
+
+# Calculate sample sizes based on available data
+n_majority <- sum(train_data$TARGET == 0)
+n_minority <- sum(train_data$TARGET == 1)
+
+# Use smaller, achievable sample sizes
+majority_sample <- min(8000, n_majority)
+minority_sample <- min(2000, n_minority)
+
+
+set.seed(123)
+train_majority <- train_data %>% filter(TARGET == 0) %>% sample_n(majority_sample)
+train_minority <- train_data %>% filter(TARGET == 1) %>% sample_n(minority_sample, replace = TRUE)
+
+train_balanced <- bind_rows(train_majority, train_minority)
+
+
+```
+
+
+```{r}
+# Train Random Forest model
+
+# Convert target to factor for classification
+train_balanced$TARGET <- as.factor(train_balanced$TARGET)
+
+# Train the model
+rf_model <- randomForest(
+  TARGET ~ .,
+  data = train_balanced,
+  ntree = 100,
+  mtry = floor(sqrt(ncol(train_balanced) - 1)),
+  importance = TRUE,
+  na.action = na.omit,
+  strata = train_balanced$TARGET
+)
+
+rf_model
+```
+The Random Forest algorithm was chosen for its robustness to outliers, ability to handle mixed data types, and built-in feature importance measures. We use 100 trees as a balance between computational efficiency and model performance.
+```{r}
+# Make predictions
+
+# Ensure validation data has no NAs
+validation_clean <- validation_data %>%
+  mutate(across(where(is.numeric), ~ifelse(is.na(.), median(., na.rm = TRUE), .))) %>%
+  filter(complete.cases(.))
+
+# Predictions
+rf_predictions <- predict(rf_model, validation_clean, type = "prob")[,2]
+rf_class <- ifelse(rf_predictions > 0.5, 1, 0)
+
+cat("Prediction probability range:", round(range(rf_predictions), 3), "\n")
+```
+
