@@ -1,0 +1,236 @@
+---
+title: "Home Credit Default Risk"
+author: "Jiafeng Zhang"
+date: "Sept 24, 2025"
+output: 
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    embed-resources: true
+execute:
+  include: true
+  eval: true    
+  warning: false
+  message: false
+
+---
+
+# Load required libraries
+```{r}
+
+library(tidyverse)
+library(skimr)
+library(janitor)
+library(naniar)
+library(corrplot)
+library(ggplot2)
+library(patchwork)
+
+```
+
+# Introduction
+
+This project aims to build a predictive model for Home Credit that identifies high-risk loan applicants using alternative data. The business faces the dual challenge of minimizing defaults while expanding financial inclusion to underserved populations with limited credit history. This EDA notebook will explore data quality, identify predictive patterns in applicant behavior and external credit sources, and investigate class imbalance to guide our modeling strategy for this binary classification problem.
+
+# Load the data
+```{r}
+
+# Load data
+application_train <- read_csv("application_train.csv")
+application_test <- read_csv("application_test.csv")
+
+
+```
+
+
+# Target Variable Analysis
+
+```{r}
+
+# Check class imbalance
+target_dist <- application_train %>% 
+  count(TARGET) %>% 
+  mutate(percentage = n/sum(n)*100)
+
+ggplot(target_dist, aes(x = factor(TARGET), y = n)) +
+  geom_col() +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), vjust = -0.5) +
+  labs(title = "Target Variable Distribution", 
+       x = "TARGET (0 = Repaid, 1 = Default)", 
+       y = "Count")
+
+# Majority class classifier accuracy
+majority_accuracy <- max(target_dist$percentage)/100
+
+```
+
+
+
+# Missing Data Analysis
+
+```{r}
+# Missing values visualization
+missing_summary <- application_train %>%
+  summarise_all(~sum(is.na(.))) %>%
+  gather(variable, missing_count) %>%
+  mutate(missing_percentage = round(missing_count / nrow(application_train) * 100, 2)) %>%
+  arrange(desc(missing_percentage))
+
+print(head(missing_summary, 20))
+
+
+
+```
+
+The dataset contains significant missing data, particularly in occupation type (~31%), external credit scores, and historical bureau records. Our solution uses a tiered approach: creating missing indicators to preserve predictive patterns, performing median/mode imputation for tree-based models, and treating missing external data as "no previous history" to maintain dataset size and information value.
+
+
+
+
+
+# AI-informed features for AI Usage Log
+ai_features <- c(
+  "AMT_CREDIT", "AMT_INCOME_TOTAL", "AMT_ANNUITY", "AMT_GOODS_PRICE",
+  "EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3",
+  "DAYS_BIRTH", "DAYS_EMPLOYED", "OCCUPATION_TYPE",
+  "NAME_EDUCATION_TYPE", "NAME_FAMILY_STATUS", "CNT_CHILDREN",
+  "NAME_INCOME_TYPE", "REGION_RATING_CLIENT", "OWN_CAR_AGE",
+  "FLAG_OWN_REALTY", "OBS_30_CNT_SOCIAL_CIRCLE", "DEF_30_CNT_SOCIAL_CIRCLE",
+  "CREDIT_ACTIVE"
+)
+
+# Replace with your actual data-informed features after EDA for AI Usage Log
+data_features <- c(
+  "EXT_SOURCE_2", "EXT_SOURCE_3", "DAYS_BIRTH", "AMT_INCOME_TOTAL",
+  "AMT_CREDIT", "AMT_ANNUITY", "NAME_EDUCATION_TYPE", "NAME_INCOME_TYPE",
+  "REGION_RATING_CLIENT", "DAYS_EMPLOYED", "CNT_CHILDREN"
+)
+
+# ---- Venn diagram ---- for AI Usage Log
+venn.plot <- venn.diagram(
+  list(AI = ai_features, Data = data_features),
+  filename = NULL,
+  fill = c("skyblue", "lightgreen"),
+  alpha = 0.5,
+  cex = 1.0,
+  cat.cex = 1.0,
+  main = "AI vs Data-Informed Feature Selection"
+)
+grid::grid.draw(venn.plot)
+
+# ---- Comparison table ---- for AI Usage Log
+feature_comparison <- tibble(
+  Feature = unique(c(ai_features, data_features)),
+  In_AI_List = Feature %in% ai_features,
+  In_Data_List = Feature %in% data_features
+)
+
+feature_comparison %>%
+  arrange(desc(In_AI_List), desc(In_Data_List)) %>%
+  knitr::kable(caption = "Comparison of AI-Informed vs Data-Informed Feature Lists")
+
+# Critique of AI’s reasoning:
+The AI correctly emphasized financial ratios (loan size vs. income), credit scores, and repayment history, which align with standard risk models. It also included demographic and social features (family size, peer defaults) that could provide indirect signals. However, some features (like OWN_CAR_AGE) may have weaker predictive power in practice. Overall, the reasoning is reasonable but needs validation against actual data distributions.
+
+# Data Quality Checks
+
+```{r}
+# Check for unusual values in DAYS_EMPLOYED
+days_employed_issues <- application_train %>%
+  filter(DAYS_EMPLOYED > 0) %>% # Positive values indicate issues
+  summarise(problematic_records = n(),
+            percentage = n() / nrow(application_train) * 100)
+
+print(days_employed_issues)
+
+# Check for near-zero variance variables
+near_zero_var <- application_train %>%
+  select(where(is.numeric)) %>%
+  summarise_all(~length(unique(.))) %>%
+  gather(variable, unique_values) %>%
+  filter(unique_values <= 5) 
+
+print(near_zero_var)
+
+
+
+```
+
+# Data-Informed Feature Exploration
+
+```{r}
+# Numerical variables vs TARGET
+num_vars <- application_train %>% 
+  select(where(is.numeric)) %>% 
+  select(-SK_ID_CURR) %>% 
+  names()
+
+# Create boxplots for top numerical variables
+application_train %>% 
+  select(TARGET, AMT_INCOME_TOTAL, AMT_CREDIT, AMT_ANNUITY) %>% 
+  pivot_longer(-TARGET) %>% 
+  ggplot(aes(x = factor(TARGET), y = value)) +
+  geom_boxplot() +
+  facet_wrap(~ name, scales = "free_y") +
+  scale_y_log10()
+
+# Categorical variables vs TARGET
+cat_vars <- application_train %>% 
+  select(where(is.character)) %>% 
+  names()
+
+# Create proportion plots for categorical variables
+application_train %>% 
+  group_by(NAME_EDUCATION_TYPE, TARGET) %>% 
+  summarise(n = n()) %>% 
+  mutate(prop = n/sum(n)) %>% 
+  ggplot(aes(x = NAME_EDUCATION_TYPE, y = prop, fill = factor(TARGET))) +
+  geom_col() +
+  coord_flip()
+
+```
+
+# Statistical Relationship Analysis
+
+```{r}
+numeric_vars <- application_train %>%
+  select(where(is.numeric)) %>%
+  select(-SK_ID_CURR) 
+
+correlations <- numeric_vars %>%
+  cor(use = "complete.obs") %>%
+  as.data.frame() %>%
+  rownames_to_column("variable") %>%
+  select(variable, TARGET) %>%
+  arrange(desc(abs(TARGET))) %>%
+  filter(!is.na(TARGET))
+
+
+print(head(correlations, 15))
+```
+
+# Data Joining with Transactional Data
+
+```{r}
+# Join with bureau data
+bureau <- read_csv("bureau.csv")
+bureau_agg <- bureau %>% 
+  group_by(SK_ID_CURR) %>% 
+  summarise(
+    bureau_loan_count = n(),
+    bureau_avg_credit_day_overdue = mean(CREDIT_DAY_OVERDUE, na.rm = TRUE)
+  )
+
+application_with_bureau <- application_train %>% 
+  left_join(bureau_agg, by = "SK_ID_CURR")
+
+head(application_with_bureau)
+```
+# Summary
+
+The data's got some issues—it's pretty unbalanced with only about 8% of people actually defaulting, and there are a bunch of missing details, especially around jobs and employment history. But the good news is, I found some really strong clues: things like a person’s credit score from other sources (the EXT_SOURCE ones), their age, and their past loan behavior are super telling. This means the model will need to handle the imbalance carefully and lean heavily on those key signals, especially when I merge in more background info from other files, to reliably spot who’s likely to default.
+
+
+
