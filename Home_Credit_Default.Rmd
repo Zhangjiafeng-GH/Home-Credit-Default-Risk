@@ -1,5 +1,5 @@
 ---
-title: "Group-3 : Capstope Project-Home_Credit_Default_Risk_Prediction"
+title: "Capstope Project-Home_Credit_Default_Risk_Prediction"
 author: "Jiafeng zhang"
 date: "Sept 24, 2025"
 output:
